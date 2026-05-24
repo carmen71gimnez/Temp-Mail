@@ -6,6 +6,8 @@ import logging
 import threading
 import re
 import html
+import io
+import json
 from bs4 import BeautifulSoup
 from flask import Flask
 from datetime import datetime
@@ -91,59 +93,78 @@ def registrar_auditoria(id_telegram, usuario, accion, correo):
 
 def procesar_y_limpiar_html(html_crudo):
     """
-    Descarga el código, extrae texto y enlaces, 
-    y elimina absolutamente todo el código CSS/HTML residual.
+    Convierte el código HTML crudo en un texto hermosamente formateado para Telegram.
+    Mantiene negritas, formatea enlaces y organiza los espacios.
     """
     if not html_crudo: 
         return "Sin contenido legible."
     
-    # 1. Cargar el código HTML en el parser
     soup = BeautifulSoup(html_crudo, 'html.parser')
     
-    # 2. Destruir de raíz etiquetas invisibles y de diseño
-    for elemento in soup(["script", "style", "head", "title", "meta", "link", "noscript", "button"]):
+    # 1. Destruir código invisible y basura
+    for elemento in soup(["script", "style", "head", "title", "meta", "noscript", "img", "svg"]):
         elemento.decompose()
         
-    # 3. Convertir saltos de línea HTML a texto real para que las palabras no se peguen
-    for br in soup.find_all("br"):
-        br.replace_with("\n")
-    for bloque in soup.find_all(["p", "div", "h1", "h2", "h3", "li", "tr"]):
-        bloque.insert_before("\n")
-        bloque.insert_after("\n")
+    # 2. Escapar el texto original para evitar inyecciones que rompan Telegram
+    for text_node in soup.find_all(string=True):
+        safe_text = str(text_node).replace('<', '&lt;').replace('>', '&gt;')
+        text_node.replace_with(safe_text)
         
-    # 4. Buscar enlaces y extraer la URL limpiamente al formato texto
+    # 3. Formatear enlaces (Botones y Links) para que Telegram los muestre bonitos
     for a in soup.find_all('a', href=True):
         texto_enlace = a.get_text(strip=True)
         url = a['href']
         if url.startswith('http'):
-            # Si el texto ya es la URL, no repetimos la información
-            if texto_enlace and texto_enlace.lower() not in url.lower():
-                a.replace_with(f" {texto_enlace} ( {url} ) ")
-            else:
-                a.replace_with(f" {url} ")
+            # Si el enlace es demasiado largo o no tiene texto, le ponemos uno genérico
+            if not texto_enlace or "http" in texto_enlace or len(texto_enlace) > 40:
+                texto_enlace = "Abrir Enlace"
+            # Reemplazamos con HTML nativo que Telegram sí entiende
+            a.replace_with(f'<a href="{url}">🔗 {texto_enlace}</a>')
             
-    # 5. Extraer el texto plano del documento depurado
-    texto_sucio = soup.get_text()
+    # 4. Formatear Negritas y Encabezados
+    for h in soup.find_all(['h1', 'h2', 'h3']):
+        texto = h.get_text(strip=True)
+        if texto:
+            h.replace_with(f"<b>{texto}</b>")
+            
+    for b in soup.find_all(['b', 'strong']):
+        texto = b.get_text(strip=True)
+        if texto:
+            b.replace_with(f"<b>{texto}</b>")
+            
+    # 5. Listas con viñetas
+    for li in soup.find_all('li'):
+        texto = li.get_text(strip=True)
+        if texto:
+            li.replace_with(f"• {texto}")
+
+    # 6. Extraer el texto preservando nuestras nuevas etiquetas (<a> y <b>)
+    texto_sucio = soup.get_text(separator='\n')
     
-    # 6. Filtrar línea por línea para desintegrar residuos sueltos de código CSS/HTML
+    # 7. Limpiar CSS residual y entidades
     lineas_filtradas = []
     for linea in texto_sucio.split('\n'):
         l = linea.strip()
-        # Ignorar líneas basura con propiedades de diseño web
-        if '{' in l or '}' in l or '@media' in l or 'margin:' in l or 'padding:' in l or 'display:' in l:
+        if '{' in l or '}' in l or '@media' in l or 'margin:' in l or 'padding:' in l:
             continue
         if l:
+            # Reemplazamos entidades web clásicas a texto real
+            l = l.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
             lineas_filtradas.append(l)
             
-    texto_puro = '\n'.join(lineas_filtradas)
-    
-    # 7. Traducir entidades web especiales a texto normal
-    texto_puro = html.unescape(texto_puro)
-    
-    # 8. Normalizar los saltos de línea (máximo 2 seguidos para no hacer spam de espacio)
-    texto_puro = re.sub(r'\n{3,}', '\n\n', texto_puro)
-    
-    return texto_puro.strip()
+    # 8. Unir las líneas aplicando un espaciado inteligente y profesional
+    texto_final = ""
+    for i, linea in enumerate(lineas_filtradas):
+        texto_final += linea
+        if i < len(lineas_filtradas) - 1:
+            # Si ambas líneas son elementos de una lista, las dejamos juntas
+            if lineas_filtradas[i+1].startswith('•') and linea.startswith('•'):
+                texto_final += "\n"
+            else:
+                # Todo lo demás recibe doble espacio para mayor limpieza visual
+                texto_final += "\n\n"
+                
+    return texto_final.strip()
 
 # ==========================================
 # INTERFAZ Y COMANDOS DEL BOT
@@ -298,36 +319,32 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asunto = msg.get('subject', 'Sin asunto')
             fecha = msg.get('date', 'Fecha desconocida')
             
-            # ¡AQUÍ ESTABA LA CLAVE! La API guarda el HTML en la llave 'content'
             html_descargado = msg.get('content') or msg.get('html') or msg.get('body') or msg.get('text') or "No se detectó contenido."
             
-            # Procesar, extraer enlaces y desintegrar el código en texto puro
+            # Texto elegantemente formateado
             texto_inspeccionado = procesar_y_limpiar_html(html_descargado)
             
-            # ==========================================
             # DESTRUCCIÓN DEL CÓDIGO HTML DE LA MEMORIA
-            # ==========================================
             del html_descargado 
             
             if len(texto_inspeccionado) > 3000:
                 texto_inspeccionado = texto_inspeccionado[:3000] + "\n\n... [Mensaje extenso recortado por seguridad]"
 
-            # Escapar SOLO etiquetas HTML de Telegram (< y >) para no romper enlaces
-            texto_seguro = texto_inspeccionado.replace('<', '&lt;').replace('>', '&gt;')
-            remitente_seguro = str(remitente).replace('<', '&lt;').replace('>', '&gt;')
-            asunto_seguro = str(asunto).replace('<', '&lt;').replace('>', '&gt;')
-            fecha_segura = str(fecha).replace('<', '&lt;').replace('>', '&gt;')
+            # Escapar la cabecera (evita errores si el asunto lleva un "<")
+            remitente_seguro = html.escape(str(remitente)).replace('&amp;', '&')
+            asunto_seguro = html.escape(str(asunto)).replace('&amp;', '&')
+            fecha_segura = html.escape(str(fecha)).replace('&amp;', '&')
 
-            # Construir la visualización nativa en Telegram
             texto_lectura = (
                 f"👤 <b>De:</b> {remitente_seguro}\n"
                 f"📌 <b>Asunto:</b> {asunto_seguro}\n"
                 f"📅 <b>Fecha:</b> {fecha_segura}\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"{texto_seguro}"
+                f"{texto_inspeccionado}"
             )
             
             teclado = [[InlineKeyboardButton("🔙 Volver a la Bandeja", callback_data='btn_actualizar')]]
+            # Utilizamos HTML nativo de Telegram para cargar nuestras etiquetas personalizadas
             await query.edit_message_text(texto_lectura, reply_markup=InlineKeyboardMarkup(teclado), parse_mode='HTML')
 
 async def comando_registros(update: Update, context: ContextTypes.DEFAULT_TYPE):
