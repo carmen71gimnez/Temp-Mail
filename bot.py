@@ -6,8 +6,6 @@ import logging
 import threading
 import re
 import html
-import io
-import json
 from bs4 import BeautifulSoup
 from flask import Flask
 from datetime import datetime
@@ -95,43 +93,54 @@ def procesar_y_limpiar_html(html_crudo):
     """
     Descarga el código, extrae texto y enlaces, 
     y elimina absolutamente todo el código CSS/HTML residual.
-    (Mantenemos la función intacta para integrarla rápido después de la depuración)
     """
     if not html_crudo: 
         return "Sin contenido legible."
     
+    # 1. Cargar el código HTML en el parser
     soup = BeautifulSoup(html_crudo, 'html.parser')
     
+    # 2. Destruir de raíz etiquetas invisibles y de diseño
     for elemento in soup(["script", "style", "head", "title", "meta", "link", "noscript", "button"]):
         elemento.decompose()
         
+    # 3. Convertir saltos de línea HTML a texto real para que las palabras no se peguen
     for br in soup.find_all("br"):
         br.replace_with("\n")
     for bloque in soup.find_all(["p", "div", "h1", "h2", "h3", "li", "tr"]):
         bloque.insert_before("\n")
         bloque.insert_after("\n")
         
+    # 4. Buscar enlaces y extraer la URL limpiamente al formato texto
     for a in soup.find_all('a', href=True):
         texto_enlace = a.get_text(strip=True)
         url = a['href']
         if url.startswith('http'):
+            # Si el texto ya es la URL, no repetimos la información
             if texto_enlace and texto_enlace.lower() not in url.lower():
                 a.replace_with(f" {texto_enlace} ( {url} ) ")
             else:
                 a.replace_with(f" {url} ")
             
+    # 5. Extraer el texto plano del documento depurado
     texto_sucio = soup.get_text()
     
+    # 6. Filtrar línea por línea para desintegrar residuos sueltos de código CSS/HTML
     lineas_filtradas = []
     for linea in texto_sucio.split('\n'):
         l = linea.strip()
+        # Ignorar líneas basura con propiedades de diseño web
         if '{' in l or '}' in l or '@media' in l or 'margin:' in l or 'padding:' in l or 'display:' in l:
             continue
         if l:
             lineas_filtradas.append(l)
             
     texto_puro = '\n'.join(lineas_filtradas)
+    
+    # 7. Traducir entidades web especiales a texto normal
     texto_puro = html.unescape(texto_puro)
+    
+    # 8. Normalizar los saltos de línea (máximo 2 seguidos para no hacer spam de espacio)
     texto_puro = re.sub(r'\n{3,}', '\n\n', texto_puro)
     
     return texto_puro.strip()
@@ -258,7 +267,7 @@ async def mostrar_bandeja(update, context: ContextTypes.DEFAULT_TYPE):
         texto += f"\n\nTienes *{len(mensajes)}* mensaje(s):"
         context.user_data['mensajes_lista'] = mensajes
         for i, msg in enumerate(mensajes[:10]):
-            remitente = msg.get('from', msg.get('sender', msg.get('fromName', 'Desconocido')))
+            remitente = msg.get('from', msg.get('sender', msg.get('sender_name', msg.get('fromName', 'Desconocido'))))
             asunto = msg.get('subject', 'Sin asunto')[:25]
             teclado.append([InlineKeyboardButton(f"📩 {remitente} - {asunto}...", callback_data=f'leer_{i}')])
 
@@ -285,26 +294,41 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if indice < len(mensajes):
             msg = mensajes[indice]
             
-            # Convertir TODO el diccionario del mensaje en texto crudo formateado
-            codigo_crudo = json.dumps(msg, indent=4, ensure_ascii=False)
+            remitente = msg.get('from', msg.get('sender', msg.get('sender_name', msg.get('fromName', 'Desconocido'))))
+            asunto = msg.get('subject', 'Sin asunto')
+            fecha = msg.get('date', 'Fecha desconocida')
             
-            # Crear un archivo .txt directamente en la memoria (sin guardarlo en disco)
-            archivo_txt = io.BytesIO(codigo_crudo.encode('utf-8'))
-            archivo_txt.name = f"inspeccion_correo_{indice}.txt"
+            # ¡AQUÍ ESTABA LA CLAVE! La API guarda el HTML en la llave 'content'
+            html_descargado = msg.get('content') or msg.get('html') or msg.get('body') or msg.get('text') or "No se detectó contenido."
             
-            texto_aviso = (
-                "🛠️ *Modo Depuración Activo*\n\n"
-                "Aquí tienes el archivo con el código crudo exacto que entregó la API. "
-                "Revisa las llaves (keys) para ver dónde está escondido el contenido real del mensaje."
+            # Procesar, extraer enlaces y desintegrar el código en texto puro
+            texto_inspeccionado = procesar_y_limpiar_html(html_descargado)
+            
+            # ==========================================
+            # DESTRUCCIÓN DEL CÓDIGO HTML DE LA MEMORIA
+            # ==========================================
+            del html_descargado 
+            
+            if len(texto_inspeccionado) > 3000:
+                texto_inspeccionado = texto_inspeccionado[:3000] + "\n\n... [Mensaje extenso recortado por seguridad]"
+
+            # Escapar SOLO etiquetas HTML de Telegram (< y >) para no romper enlaces
+            texto_seguro = texto_inspeccionado.replace('<', '&lt;').replace('>', '&gt;')
+            remitente_seguro = str(remitente).replace('<', '&lt;').replace('>', '&gt;')
+            asunto_seguro = str(asunto).replace('<', '&lt;').replace('>', '&gt;')
+            fecha_segura = str(fecha).replace('<', '&lt;').replace('>', '&gt;')
+
+            # Construir la visualización nativa en Telegram
+            texto_lectura = (
+                f"👤 <b>De:</b> {remitente_seguro}\n"
+                f"📌 <b>Asunto:</b> {asunto_seguro}\n"
+                f"📅 <b>Fecha:</b> {fecha_segura}\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"{texto_seguro}"
             )
             
-            # Enviar el archivo como documento por Telegram
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=archivo_txt,
-                caption=texto_aviso,
-                parse_mode='Markdown'
-            )
+            teclado = [[InlineKeyboardButton("🔙 Volver a la Bandeja", callback_data='btn_actualizar')]]
+            await query.edit_message_text(texto_lectura, reply_markup=InlineKeyboardMarkup(teclado), parse_mode='HTML')
 
 async def comando_registros(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not WEBHOOK_URL:
