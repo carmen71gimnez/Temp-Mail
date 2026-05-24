@@ -93,78 +93,81 @@ def registrar_auditoria(id_telegram, usuario, accion, correo):
 
 def procesar_y_limpiar_html(html_crudo):
     """
-    Convierte el código HTML crudo en un texto hermosamente formateado para Telegram.
-    Mantiene negritas, formatea enlaces y organiza los espacios.
+    Motor a prueba de fallos: Convierte HTML crudo a un diseño elegante 
+    usando marcadores seguros para que Telegram nunca se congele.
     """
     if not html_crudo: 
         return "Sin contenido legible."
     
     soup = BeautifulSoup(html_crudo, 'html.parser')
     
-    # 1. Destruir código invisible y basura
+    # 1. Eliminar código oculto
     for elemento in soup(["script", "style", "head", "title", "meta", "noscript", "img", "svg"]):
         elemento.decompose()
         
-    # 2. Escapar el texto original para evitar inyecciones que rompan Telegram
-    for text_node in soup.find_all(string=True):
-        safe_text = str(text_node).replace('<', '&lt;').replace('>', '&gt;')
-        text_node.replace_with(safe_text)
+    # 2. Reemplazar elementos de bloque con saltos de línea reales
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for p in soup.find_all(["p", "div", "tr", "li"]):
+        p.insert_before("\n")
+        p.insert_after("\n")
         
-    # 3. Formatear enlaces (Botones y Links) para que Telegram los muestre bonitos
+    # 3. Formatear Enlaces (Usamos marcadores personalizados 【url|texto】)
     for a in soup.find_all('a', href=True):
-        texto_enlace = a.get_text(strip=True)
+        texto = a.get_text(strip=True)
         url = a['href']
         if url.startswith('http'):
-            # Si el enlace es demasiado largo o no tiene texto, le ponemos uno genérico
-            if not texto_enlace or "http" in texto_enlace or len(texto_enlace) > 40:
-                texto_enlace = "Abrir Enlace"
-            # Reemplazamos con HTML nativo que Telegram sí entiende
-            a.replace_with(f'<a href="{url}">🔗 {texto_enlace}</a>')
+            # Acortar textos gigantes y quitar caracteres que rompan el regex
+            if not texto or len(texto) > 40 or "http" in texto:
+                texto = "Abrir Enlace"
+            texto = texto.replace('【', '[').replace('】', ']').replace('|', '-')
+            url = url.replace('【', '').replace('】', '').replace('|', '')
             
-    # 4. Formatear Negritas y Encabezados
-    for h in soup.find_all(['h1', 'h2', 'h3']):
+            a.replace_with(f"【{url}|🔗 {texto}】")
+            
+    # 4. Formatear Negritas y Títulos (Usamos marcadores personalizados 『texto』)
+    for h in soup.find_all(['h1', 'h2', 'h3', 'b', 'strong']):
         texto = h.get_text(strip=True)
         if texto:
-            h.replace_with(f"<b>{texto}</b>")
+            texto = texto.replace('『', '').replace('』', '')
+            h.replace_with(f"『{texto}』")
             
-    for b in soup.find_all(['b', 'strong']):
-        texto = b.get_text(strip=True)
-        if texto:
-            b.replace_with(f"<b>{texto}</b>")
-            
-    # 5. Listas con viñetas
+    # 5. Formatear Listas
     for li in soup.find_all('li'):
         texto = li.get_text(strip=True)
         if texto:
             li.replace_with(f"• {texto}")
 
-    # 6. Extraer el texto preservando nuestras nuevas etiquetas (<a> y <b>)
-    texto_sucio = soup.get_text(separator='\n')
+    # Extraemos todo el texto puro con nuestros marcadores incrustados
+    texto_sucio = soup.get_text()
     
-    # 7. Limpiar CSS residual y entidades
-    lineas_filtradas = []
+    # 6. Limpiar CSS residual y líneas vacías
+    lineas = []
     for linea in texto_sucio.split('\n'):
         l = linea.strip()
         if '{' in l or '}' in l or '@media' in l or 'margin:' in l or 'padding:' in l:
             continue
         if l:
-            # Reemplazamos entidades web clásicas a texto real
-            l = l.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
-            lineas_filtradas.append(l)
+            lineas.append(l)
             
-    # 8. Unir las líneas aplicando un espaciado inteligente y profesional
-    texto_final = ""
-    for i, linea in enumerate(lineas_filtradas):
-        texto_final += linea
-        if i < len(lineas_filtradas) - 1:
-            # Si ambas líneas son elementos de una lista, las dejamos juntas
-            if lineas_filtradas[i+1].startswith('•') and linea.startswith('•'):
-                texto_final += "\n"
+    # 7. Unir con espaciado profesional (doble salto de línea excepto en viñetas)
+    texto_unido = ""
+    for i, linea in enumerate(lineas):
+        texto_unido += linea
+        if i < len(lineas) - 1:
+            if lineas[i+1].startswith('•') and linea.startswith('•'):
+                texto_unido += "\n"
             else:
-                # Todo lo demás recibe doble espacio para mayor limpieza visual
-                texto_final += "\n\n"
+                texto_unido += "\n\n"
                 
-    return texto_final.strip()
+    # 8. ESCUDO: Escapamos todo el texto web nativo para que el API de Telegram no colapse
+    texto_seguro = html.escape(texto_unido)
+    
+    # 9. Finalmente, transformamos nuestros marcadores en HTML perfecto y seguro
+    texto_seguro = texto_seguro.replace('『', '<b>').replace('』', '</b>')
+    texto_seguro = re.sub(r'【(.*?)\|(.*?)】', r'<a href="\1">\2</a>', texto_seguro)
+    
+    return texto_seguro.strip()
 
 # ==========================================
 # INTERFAZ Y COMANDOS DEL BOT
@@ -321,19 +324,18 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             html_descargado = msg.get('content') or msg.get('html') or msg.get('body') or msg.get('text') or "No se detectó contenido."
             
-            # Texto elegantemente formateado
+            # Formatear el cuerpo del correo con nuestra nueva función a prueba de fallos
             texto_inspeccionado = procesar_y_limpiar_html(html_descargado)
             
-            # DESTRUCCIÓN DEL CÓDIGO HTML DE LA MEMORIA
             del html_descargado 
             
             if len(texto_inspeccionado) > 3000:
-                texto_inspeccionado = texto_inspeccionado[:3000] + "\n\n... [Mensaje extenso recortado por seguridad]"
+                texto_inspeccionado = texto_inspeccionado[:3000] + "\n\n... <b>[Mensaje extenso recortado por seguridad]</b>"
 
-            # Escapar la cabecera (evita errores si el asunto lleva un "<")
-            remitente_seguro = html.escape(str(remitente)).replace('&amp;', '&')
-            asunto_seguro = html.escape(str(asunto)).replace('&amp;', '&')
-            fecha_segura = html.escape(str(fecha)).replace('&amp;', '&')
+            # Escapar datos del encabezado para no romper Telegram HTML
+            remitente_seguro = html.escape(str(remitente))
+            asunto_seguro = html.escape(str(asunto))
+            fecha_segura = html.escape(str(fecha))
 
             texto_lectura = (
                 f"👤 <b>De:</b> {remitente_seguro}\n"
@@ -344,7 +346,6 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             teclado = [[InlineKeyboardButton("🔙 Volver a la Bandeja", callback_data='btn_actualizar')]]
-            # Utilizamos HTML nativo de Telegram para cargar nuestras etiquetas personalizadas
             await query.edit_message_text(texto_lectura, reply_markup=InlineKeyboardMarkup(teclado), parse_mode='HTML')
 
 async def comando_registros(update: Update, context: ContextTypes.DEFAULT_TYPE):
