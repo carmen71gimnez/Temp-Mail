@@ -30,14 +30,11 @@ ESPERANDO_PERSONALIZADO, ESPERANDO_RECUPERAR = range(2)
 # SERVIDOR WEB FLASK (ANTISUSPENSIÓN 24/7)
 # ==========================================
 app = Flask(__name__)
-
-# Silenciar los logs internos de Flask para no saturar Render
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 @app.route('/')
 def home():
-    """Interfaz web limpia y profesional que verá el robot de reactivación."""
     html_content = """
     <!DOCTYPE html>
     <html lang="es">
@@ -46,21 +43,8 @@ def home():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Sistema Temp Mail</title>
         <style>
-            body { 
-                font-family: Arial, sans-serif; 
-                background-color: #ffffff; 
-                color: #212529; 
-                text-align: center; 
-                padding-top: 10vh; 
-            }
-            .panel { 
-                display: inline-block; 
-                padding: 30px 50px; 
-                border: 1px solid #dee2e6; 
-                border-radius: 8px; 
-                background-color: #f8f9fa; 
-                box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-            }
+            body { font-family: Arial, sans-serif; background-color: #ffffff; color: #212529; text-align: center; padding-top: 10vh; }
+            .panel { display: inline-block; padding: 30px 50px; border: 1px solid #dee2e6; border-radius: 8px; background-color: #f8f9fa; }
             h2 { color: #0d6efd; margin-top: 0; }
             p { color: #6c757d; margin-bottom: 0; }
         </style>
@@ -76,7 +60,6 @@ def home():
     return html_content
 
 def servidor_web():
-    """Inicia Flask en el puerto asignado por Render."""
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -106,16 +89,31 @@ def registrar_auditoria(id_telegram, usuario, accion, correo):
         logging.error(f"Error en auditoría: {e}")
 
 def limpiar_html(texto_html):
-    """Limpia las etiquetas web para que el texto sea legible en Telegram."""
+    """Filtro inteligente para adaptar correos a Telegram sin perder enlaces vitales."""
     if not texto_html: 
         return "Sin contenido legible."
     
     texto = str(texto_html)
-    # Convertimos los saltos de línea web en saltos reales de Telegram
+    
+    # 1. Eliminar completamente bloques de estilos, scripts y cabeceras
+    texto = re.sub(r'<(head|style|script)[^>]*>.*?</\1>', '', texto, flags=re.IGNORECASE | re.DOTALL)
+    
+    # 2. Rescatar enlaces de botones: Convierte <a href="URL">Texto</a> en "Texto (URL)"
+    texto = re.sub(r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>(.*?)</a>', r'\2 (\1)', texto, flags=re.IGNORECASE | re.DOTALL)
+    
+    # 3. Formatear saltos de línea para Telegram
     texto = re.sub(r'<br\s*/?>', '\n', texto, flags=re.IGNORECASE)
     texto = re.sub(r'</p>', '\n\n', texto, flags=re.IGNORECASE)
-    # Eliminamos cualquier otra etiqueta sobrante (botones, tablas, colores)
+    
+    # 4. Eliminar el resto de etiquetas HTML sobrantes (imágenes, tablas, divs)
     texto = re.sub(r'<[^>]+>', '', texto)
+    
+    # 5. Traducir símbolos especiales (&nbsp;, &amp;) a texto normal
+    texto = html.unescape(texto)
+    
+    # 6. Limpieza final de espacios y saltos de línea acumulados
+    texto = re.sub(r'\n\s*\n', '\n\n', texto)
+    texto = re.sub(r' +', ' ', texto)
     
     return texto.strip()
 
@@ -268,19 +266,18 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if indice < len(mensajes):
             msg = mensajes[indice]
             
-            # Captura del remitente mejorada
             remitente = msg.get('from', msg.get('sender', msg.get('fromName', 'Desconocido')))
             asunto = msg.get('subject', 'Sin asunto')
             fecha = msg.get('date', 'Fecha desconocida')
             
-            # Extracción y limpieza del cuerpo del correo
-            contenido_bruto = msg.get('text') or msg.get('body') or msg.get('html') or "No se detectó texto legible."
+            # Obtener el contenido bruto y pasarlo por el filtro inteligente
+            contenido_bruto = msg.get('html') or msg.get('body') or msg.get('text') or "No se detectó texto legible."
             contenido_limpio = limpiar_html(contenido_bruto)
             
-            # Límite seguro de Telegram
             if len(contenido_limpio) > 3000:
                 contenido_limpio = contenido_limpio[:3000] + "\n\n... [El mensaje es muy largo y ha sido recortado]"
 
+            # Formateo visual limpio en Telegram
             texto_lectura = (
                 f"👤 <b>De:</b> {html.escape(remitente)}\n"
                 f"📌 <b>Asunto:</b> {html.escape(asunto)}\n"
@@ -320,15 +317,12 @@ async def comando_registros(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error interno: {str(e)}")
 
 # ==========================================
-# MOTOR PRINCIPAL (DOBLE HILO CON FLASK)
+# MOTOR PRINCIPAL
 # ==========================================
 def main():
-    # 1. Iniciar Flask en un hilo secundario
     hilo_web = threading.Thread(target=servidor_web, daemon=True)
     hilo_web.start()
-    print("🌐 Servidor web Flask anti-suspensión activo.")
-
-    # 2. Iniciar el bot de Telegram en el hilo principal
+    
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -347,7 +341,6 @@ def main():
     app.add_handler(CallbackQueryHandler(bandeja_acciones, pattern='^(btn_actualizar|btn_inicio|leer_.*)$'))
     app.add_handler(CommandHandler('registrostech', comando_registros))
 
-    print("🤖 Bot de Telegram escuchando...")
     app.run_polling()
 
 if __name__ == '__main__':
