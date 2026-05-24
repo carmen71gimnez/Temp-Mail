@@ -4,6 +4,8 @@ import random
 import string
 import logging
 import threading
+import re
+import html
 from flask import Flask
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -102,6 +104,20 @@ def registrar_auditoria(id_telegram, usuario, accion, correo):
         requests.post(WEBHOOK_URL, json=payload, timeout=5)
     except Exception as e:
         logging.error(f"Error en auditoría: {e}")
+
+def limpiar_html(texto_html):
+    """Limpia las etiquetas web para que el texto sea legible en Telegram."""
+    if not texto_html: 
+        return "Sin contenido legible."
+    
+    texto = str(texto_html)
+    # Convertimos los saltos de línea web en saltos reales de Telegram
+    texto = re.sub(r'<br\s*/?>', '\n', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'</p>', '\n\n', texto, flags=re.IGNORECASE)
+    # Eliminamos cualquier otra etiqueta sobrante (botones, tablas, colores)
+    texto = re.sub(r'<[^>]+>', '', texto)
+    
+    return texto.strip()
 
 # ==========================================
 # INTERFAZ Y COMANDOS DEL BOT
@@ -225,7 +241,7 @@ async def mostrar_bandeja(update, context: ContextTypes.DEFAULT_TYPE):
         texto += f"\n\nTienes *{len(mensajes)}* mensaje(s):"
         context.user_data['mensajes_lista'] = mensajes
         for i, msg in enumerate(mensajes[:10]):
-            remitente = msg.get('from', 'Desconocido')
+            remitente = msg.get('from', msg.get('sender', msg.get('fromName', 'Desconocido')))
             asunto = msg.get('subject', 'Sin asunto')[:25]
             teclado.append([InlineKeyboardButton(f"📩 {remitente} - {asunto}...", callback_data=f'leer_{i}')])
 
@@ -251,15 +267,30 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if indice < len(mensajes):
             msg = mensajes[indice]
+            
+            # Captura del remitente mejorada
+            remitente = msg.get('from', msg.get('sender', msg.get('fromName', 'Desconocido')))
+            asunto = msg.get('subject', 'Sin asunto')
+            fecha = msg.get('date', 'Fecha desconocida')
+            
+            # Extracción y limpieza del cuerpo del correo
+            contenido_bruto = msg.get('text') or msg.get('body') or msg.get('html') or "No se detectó texto legible."
+            contenido_limpio = limpiar_html(contenido_bruto)
+            
+            # Límite seguro de Telegram
+            if len(contenido_limpio) > 3000:
+                contenido_limpio = contenido_limpio[:3000] + "\n\n... [El mensaje es muy largo y ha sido recortado]"
+
             texto_lectura = (
-                f"👤 *De:* {msg.get('from')}\n"
-                f"📌 *Asunto:* {msg.get('subject')}\n"
-                f"📅 *Fecha:* {msg.get('date')}\n"
+                f"👤 <b>De:</b> {html.escape(remitente)}\n"
+                f"📌 <b>Asunto:</b> {html.escape(asunto)}\n"
+                f"📅 <b>Fecha:</b> {html.escape(fecha)}\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"_(Para leer contenido HTML complejo o descargar adjuntos, ingresa al panel web de flawmail.site con este correo)_"
+                f"{html.escape(contenido_limpio)}"
             )
+            
             teclado = [[InlineKeyboardButton("🔙 Volver a la Bandeja", callback_data='btn_actualizar')]]
-            await query.edit_message_text(texto_lectura, reply_markup=InlineKeyboardMarkup(teclado), parse_mode='Markdown')
+            await query.edit_message_text(texto_lectura, reply_markup=InlineKeyboardMarkup(teclado), parse_mode='HTML')
 
 async def comando_registros(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not WEBHOOK_URL:
