@@ -65,7 +65,7 @@ def servidor_web():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# FUNCIONES AUXILIARES (INSPECTOR WEB Y BACKEND)
+# FUNCIONES AUXILIARES (INSPECTOR DE CÓDIGO)
 # ==========================================
 def obtener_dominio():
     try:
@@ -89,37 +89,57 @@ def registrar_auditoria(id_telegram, usuario, accion, correo):
     except Exception as e:
         logging.error(f"Error en auditoría: {e}")
 
-def limpiar_html(texto_html):
+def procesar_y_limpiar_html(html_crudo):
     """
-    Actúa como un inspector web real. 
-    Analiza el HTML, extrae enlaces, destruye estilos y reconstruye el texto limpio.
+    Descarga el código completo, extrae la información útil, 
+    elimina absolutamente todo el código CSS/HTML y devuelve solo texto.
     """
-    if not texto_html: 
+    if not html_crudo: 
         return "Sin contenido legible."
     
-    # 1. El motor lee y comprende la estructura de la página
-    soup = BeautifulSoup(texto_html, 'html.parser')
+    # 1. Cargar el código HTML descargado en el inspector
+    soup = BeautifulSoup(html_crudo, 'html.parser')
     
-    # 2. Destruimos por completo la "basura" visual (CSS, Scripts, Metadatos)
-    for element in soup(["script", "style", "head", "title", "meta", "[document]"]):
-        element.extract()
+    # 2. Destruir de raíz etiquetas de estilos, scripts, metadatos y enlaces de hojas de estilo
+    for elemento_codigo in soup(["script", "style", "head", "title", "meta", "link", "noscript"]):
+        elemento_codigo.extract()
         
-    # 3. Buscar los botones/enlaces y reconstruirlos para Telegram
+    # 3. Buscar enlaces e inyectar la URL directamente en el flujo de texto
     for a in soup.find_all('a', href=True):
-        link_text = a.get_text(strip=True)
-        href = a['href']
-        if link_text:
-            a.replace_with(f"{link_text} ({href})")
+        texto_enlace = a.get_text(strip=True)
+        url = a['href']
+        if texto_enlace:
+            # Si el texto del botón ya es la URL, no la duplicamos
+            if texto_enlace.lower() in url.lower():
+                a.replace_with(f" [ Enlace: {url} ] ")
+            else:
+                a.replace_with(f" {texto_enlace} ({url}) ")
         else:
-            a.replace_with(f"🔗 Enlace adjunto: ({href})")
+            a.replace_with(f" [ Enlace: {url} ] ")
             
-    # 4. Extraer únicamente el texto visible
-    texto = soup.get_text(separator='\n')
+    # 4. Extraer el texto plano del documento depurado
+    texto_sucio = soup.get_text(separator='\n')
     
-    # 5. Limpieza final de espacios muertos generados por tablas web
-    texto = re.sub(r'\n\s*\n', '\n\n', texto)
+    # 5. Filtrar línea por línea para desintegrar residuos sueltos de código CSS
+    lineas_filtradas = []
+    for linea in texto_sucio.split('\n'):
+        l = linea.strip()
+        # Ignorar líneas con propiedades o llaves de diseño web
+        if '{' in l or '}' in l or 'margin:' in l or 'padding:' in l or 'display:' in l or 'background:' in l:
+            continue
+        if l:
+            lineas_filtradas.append(l)
+            
+    texto_puro = '\n'.join(lineas_filtradas)
     
-    return texto.strip()
+    # 6. Traducir entidades web especiales (&zwnj;, &nbsp;, &amp;, etc.) a texto normal
+    texto_puro = html.unescape(texto_puro)
+    
+    # 7. Normalizar los espacios en blanco y saltos de línea repetidos
+    texto_puro = re.sub(r'\n\s*\n', '\n\n', texto_puro)
+    texto_puro = re.sub(r' +', ' ', texto_puro)
+    
+    return texto_puro.strip()
 
 # ==========================================
 # INTERFAZ Y COMANDOS DEL BOT
@@ -274,19 +294,22 @@ async def bandeja_acciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asunto = msg.get('subject', 'Sin asunto')
             fecha = msg.get('date', 'Fecha desconocida')
             
-            # Obtener el contenido y enviarlo al inspector web
-            contenido_bruto = msg.get('html') or msg.get('body') or msg.get('text') or "No se detectó texto legible."
-            contenido_limpio = limpiar_html(contenido_bruto)
+            # Descargar el bloque HTML crudo completo
+            html_descargado = msg.get('html') or msg.get('body') or msg.get('text') or "No se detectó contenido."
             
-            if len(contenido_limpio) > 3000:
-                contenido_limpio = contenido_limpio[:3000] + "\n\n... [El mensaje es muy largo y ha sido recortado]"
+            # Procesar, extraer enlaces y desintegrar el código
+            texto_inspeccionado = procesar_y_limpiar_html(html_descargado)
+            
+            if len(texto_inspeccionado) > 3000:
+                texto_inspeccionado = texto_inspeccionado[:3000] + "\n\n... [Mensaje extenso recortado por seguridad]"
 
+            # Construir la visualización nativa en Telegram aplicando escape seguro
             texto_lectura = (
                 f"👤 <b>De:</b> {html.escape(remitente)}\n"
                 f"📌 <b>Asunto:</b> {html.escape(asunto)}\n"
                 f"📅 <b>Fecha:</b> {html.escape(fecha)}\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"{html.escape(contenido_limpio)}"
+                f"{html.escape(texto_inspeccionado)}"
             )
             
             teclado = [[InlineKeyboardButton("🔙 Volver a la Bandeja", callback_data='btn_actualizar')]]
